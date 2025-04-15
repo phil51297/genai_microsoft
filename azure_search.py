@@ -175,21 +175,16 @@ def search_documents(query, index_name, top_k=3):
     if not query_embedding:
         return []
     
-    # prepare search query
     search_payload = {
-        "search": "*",
-        "vectorSearch": {
-            "queries": [
-                {
-                    "vector": query_embedding,
-                    "fields": "embedding",
-                    "k": top_k,
-                    "recall": 0.8
-                }
-            ]
-        },
         "select": "content",
-        "top": top_k
+        "top": top_k,
+        "vectors": [
+            {
+                "value": query_embedding,
+                "fields": "embedding",
+                "k": top_k
+            }
+        ]
     }
     
     try:
