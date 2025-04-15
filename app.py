@@ -5,6 +5,10 @@ import PyPDF2
 import docx
 import time
 import re
+from dotenv import load_dotenv
+from azure_search import create_search_index, index_chunks, search_documents, generate_answer
+
+load_dotenv()
 
 st.set_page_config(
     page_title="MedAssist - Assistant IA médical",
@@ -56,35 +60,36 @@ def chunk_text(text, chunk_size=1000, overlap=200):
     
     return chunks
 
-# initialize session state if necessary
 if 'document_text' not in st.session_state:
     st.session_state.document_text = None
 if 'chunks' not in st.session_state:
     st.session_state.chunks = None
 if 'processing_stage' not in st.session_state:
-    st.session_state.processing_stage = 'upload'  # Étapes: 'upload', 'extracted', 'chunked'
+    st.session_state.processing_stage = 'upload'
+if 'index_name' not in st.session_state:
+    st.session_state.index_name = None
 
-# interface
 st.title("MedAssist - Assistant IA médical")
 
-# sidebar
 with st.sidebar:
     st.title("🏥 MedAssist")
     st.write("Assistant IA médical pour l'aide au diagnostic")
     st.write("---")
     st.write("Développé pour le Hackathon OpenCertif")
     
-    # Affichage de l'étape actuelle
     if st.session_state.processing_stage == 'upload':
         st.info("Étape 1: Upload du document")
     elif st.session_state.processing_stage == 'extracted':
         st.info("Étape 2: Extraction du texte")
     elif st.session_state.processing_stage == 'chunked':
         st.info("Étape 3: Segmentation en chunks")
+    elif st.session_state.processing_stage == 'indexed':
+        st.info("Étape 4: Recherche et génération")
 
+# upload
 if st.session_state.processing_stage == 'upload':
     st.subheader("Téléversez votre document pour commencer")
-
+    
     uploaded_file = st.file_uploader("Choisissez un fichier PDF ou DOCX", type=["pdf", "docx"])
     
     if uploaded_file is not None:
@@ -99,6 +104,7 @@ if st.session_state.processing_stage == 'upload':
         
         if st.button("Extraire le texte"):
             with st.spinner("Extraction du texte en cours..."):
+                # temporary file
                 with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     tmp_file_path = tmp_file.name
@@ -110,15 +116,13 @@ if st.session_state.processing_stage == 'upload':
                 else:
                     text = "Type de fichier non pris en charge"
                 
+                # delete temporary file
                 os.unlink(tmp_file_path)
-                
-                time.sleep(0.5)
             
             st.session_state.document_text = text
             st.session_state.processing_stage = 'extracted'
             st.experimental_rerun()
 
-# display extracted text
 elif st.session_state.processing_stage == 'extracted':
     st.subheader("Texte extrait du document")
     
@@ -129,12 +133,9 @@ elif st.session_state.processing_stage == 'extracted':
                     ("..." if len(st.session_state.document_text) > 5000 else ""), 
                     height=300)
     
-    # chunking
     if st.button("Segmenter le texte en chunks"):
         with st.spinner("Segmentation en cours..."):
             chunks = chunk_text(st.session_state.document_text)
-            
-            time.sleep(0.5)
         
         st.session_state.chunks = chunks
         st.session_state.processing_stage = 'chunked'
@@ -152,7 +153,7 @@ elif st.session_state.processing_stage == 'chunked':
     chunks = st.session_state.chunks
     st.success(f"Segmentation terminée! {len(chunks)} chunks créés.")
     
-    for i, chunk in enumerate(chunks[:5]):  # Limiter l'affichage aux 5 premiers chunks
+    for i, chunk in enumerate(chunks[:5]):
         with st.expander(f"Chunk {i+1}/{len(chunks)}"):
             st.text_area(f"Contenu du chunk {i+1}", chunk, height=150)
     
@@ -172,3 +173,51 @@ elif st.session_state.processing_stage == 'chunked':
             st.session_state.processing_stage = 'upload'
             st.experimental_rerun()
     
+    st.write("### Étape suivante")
+    if st.button("Indexer dans Azure AI Search"):
+        with st.spinner("Indexation en cours... Cela peut prendre un moment"):
+            try:
+                index_name = f"medassist-index-{int(time.time())}"
+                create_search_index(index_name)
+                
+                indexed_count, result = index_chunks(st.session_state.chunks, index_name)
+                
+                if indexed_count > 0:
+                    st.session_state.index_name = index_name
+                    st.session_state.processing_stage = 'indexed'
+                    st.experimental_rerun()
+                else:
+                    st.error("Aucun chunk n'a pu être indexé. Vérifiez les clés API.")
+            except Exception as e:
+                st.error(f"Erreur lors de l'indexation: {str(e)}")
+
+elif st.session_state.processing_stage == 'indexed':
+    st.subheader("Posez des questions sur votre document")
+    
+    st.success(f"Document indexé avec succès dans Azure AI Search!")
+    
+    query = st.text_input("Posez votre question médicale")
+    
+    if query and st.button("Rechercher"):
+        with st.spinner("Recherche et génération de la réponse en cours..."):
+            relevant_docs = search_documents(query, st.session_state.index_name, top_k=3)
+            
+            if relevant_docs:
+                answer = generate_answer(query, relevant_docs)
+                
+                st.write("### Réponse:")
+                st.write(answer)
+                
+                with st.expander("Sources utilisées"):
+                    for i, doc in enumerate(relevant_docs):
+                        st.markdown(f"**Source {i+1}:**")
+                        st.write(doc[:300] + "..." if len(doc) > 300 else doc)
+            else:
+                st.warning("Aucun passage pertinent n'a été trouvé pour cette question.")
+    
+    if st.button("Téléverser un nouveau document"):
+        st.session_state.document_text = None
+        st.session_state.chunks = None
+        st.session_state.index_name = None
+        st.session_state.processing_stage = 'upload'
+        st.experimental_rerun()
